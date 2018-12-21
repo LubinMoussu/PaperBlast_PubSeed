@@ -53,6 +53,65 @@ class Protein_Evidence():
         self.evidence = evidence
         self.pubmed_IDs = pubmed_IDs
 
+class Protein():
+    def __init__(self,
+                 accession_code,
+                 database_sources,
+                 entry_ID,
+                 functional_roles,
+                 genome_names,
+                 matches_PubSeed_features,
+                 pubmed_IDs):
+
+        self.accession_code = accession_code
+        self.database_sources = database_sources
+        self.entry_ID = entry_ID
+        self.functional_roles = functional_roles
+        self.genome_names = genome_names
+        self.matches_PubSeed_features = matches_PubSeed_features
+        self.pubmed_IDs = pubmed_IDs
+
+    def get_PubSeed_Matches_features_from_database_Sources(self, Blast_parameters, all_PubSeed_genomes):
+
+        entries = self.accession_code
+        prot = False
+        self.matches_PubSeed_features = []
+        for entry in entries:
+            matches_features = get_PubSeed_Matches_features_from_ProteinID(entry)
+            if not matches_features:
+                # If entry_ID of databases are not found in PubSeed, the protein sequence is retrieved from databases and blast against genomes of PubSeed
+                uniprot_entry = get_uniprot_fasta(entry)
+                if uniprot_entry['taxon_identifier']:
+                    # If there is a identified reference genome, find PubSeed candidates
+                    matches_features = get_PubSeed_Matches_features_from_Sources_prot_sequences(entry, Blast_parameters, uniprot_entry['seq'], uniprot_entry['taxon_identifier'], all_PubSeed_genomes)
+            if matches_features:
+                # Check if genome_ID is within expected genome_IDs in all_PubSeed_genomes
+                matches_features = [fig for fig in matches_features if get_orgid_from_fig(fig) in all_PubSeed_genomes]
+                if matches_features:
+                    self.matches_PubSeed_features = matches_features
+                    prot = True
+        return self, prot
+
+    def update_literature_pubseed_feature(self, browser, EC_number_sufficiency):
+
+        entry_pubmed_IDs = list(set([pubmed_ID for site in self.pubmed_IDs for pubmed_ID in self.pubmed_IDs[site]]))
+        protein_ID = self.entry_ID
+        features_to_curate = []
+
+        if protein_ID and self.matches_PubSeed_features and entry_pubmed_IDs:
+            # if the protein_ID has an entry in PubSeed and an evidence article, check if the article is assigned to PubSeed entry
+            for fig in self.matches_PubSeed_features:
+                all_fig_information = get_pubseed_fig_information(fig)
+                # Curate literature of the fig
+                curate_literature_to_fig(fig, all_fig_information[fig]['Ev'], entry_pubmed_IDs, browser)
+
+                # check if the current annotation is consistent with reference annotations. If not, trigger manual curation
+                consistency = functional_role_consistency(all_fig_information[fig], self, 0.6, EC_number_sufficiency)
+
+                if not consistency:
+                    features_to_curate.append(fig)
+        return consistency, features_to_curate
+
 def PaperBlast_Query(seq):
         url =  'http://papers.genomics.lbl.gov/cgi-bin/litSearch.cgi?'
         values = {"query": seq,
@@ -67,11 +126,6 @@ def PaperBlast_Query(seq):
         # Create the request
         request = "{0}&{1}".format(url, data)
         opener = urllib.request.build_opener()
-        # try:
-        #     response = opener.open(request,timeout=60)
-        #     return response
-        # except urllib.error.URLError, timeout:
-        #     return None
         try:
             response = opener.open(request, timeout=60)
             sleep(1)
@@ -95,7 +149,7 @@ def get_entry_evidences(seq, targeted_sites, genome_exceptions):
         for genome in genomes_features:
             genome_ID = genomes_features.index(genome)
 
-            entry_evidence = {'entry_id': '',
+            entry_evidence = {'entry_ID': '',
                               'database_sources': {},
                               'accession_code': [],
                               'pubmed_IDs': [],
@@ -111,7 +165,6 @@ def get_entry_evidences(seq, targeted_sites, genome_exceptions):
             databases_pubmed_IDs = {site: [] for site in targeted_sites}
             databases_functional_role = {site: [] for site in targeted_sites}
 
-            # if genome_ID == 0:
             if genome_ID:
                 for child in genome.children:
                     if child.name:
@@ -153,21 +206,26 @@ def get_entry_evidences(seq, targeted_sites, genome_exceptions):
             protein_IDs = list(set([protein_ID for site in database_sources for protein_ID in database_sources[site] if
                                     protein_ID[0].isupper()]))
 
-            entry_evidence['pubmed_IDs'] = databases_pubmed_IDs
-            entry_evidence['database_sources'] = database_sources
-            entry_evidence['accession_code'] = protein_IDs
-            entry_evidence['functional_roles'] = databases_functional_role
             if protein_IDs:
+                # For all protein_ID founds in protein_IDs, an object is instantiated with all features collected above
                 for protein_ID in protein_IDs:
                     if protein_ID not in evidence_sets:
+                        # If the protein_ID do not refer to an organism in genome_exceptions,  an object is instantiated
                         if not set(entry_evidence['genome_names']).intersection(genome_exceptions):
-                            entry_evidence['entry_id'] = protein_ID
-                            evidence_sets[protein_ID] = entry_evidence
+                            matches_PubSeed_features = []
+                            evidence_sets[protein_ID] = Protein(protein_IDs,
+                                                                database_sources,
+                                                                protein_ID,
+                                                                databases_functional_role,
+                                                                entry_evidence['genome_names'],
+                                                                matches_PubSeed_features,
+                                                                databases_pubmed_IDs
+                                                                )
         return evidence_sets
    
 def query_protein_ID_to_PubSeed(protein_ID):
     url = "http://pubseed.theseed.org//seedviewer.cgi?pattern={0}&page=Find&act=check_search".format(protein_ID)
-    # Create the
+    # Check if the protein_ID coming from different databases is present in PubSeed
     request = url
     opener = urllib.request.build_opener()
     try:
@@ -271,24 +329,10 @@ def get_PubSeed_Matches_features_from_Sources_IDs(evidence_sets,
     '''
 
     for protein_ID in list(evidence_sets.keys()):
-        entries = evidence_sets[protein_ID]['accession_code']
-        prot = False
-        evidence_sets[protein_ID]['matches_PubSeed_features'] = []
-        for entry in entries:
-            matches_features = get_PubSeed_Matches_features_from_ProteinID(entry)
-            if not matches_features:
-                # If entry_ID of databases are not found in PubSeed, the protein sequence is retrieved from databases and blast against genomes of PubSeed
-                uniprot_entry = get_uniprot_fasta(entry)
-                if uniprot_entry['taxon_identifier']:
-                    # If there is a identified reference genome, find PubSeed candidates
-                    matches_features = get_PubSeed_Matches_features_from_Sources_prot_sequences(entry, Blast_parameters, uniprot_entry['seq'], uniprot_entry['taxon_identifier'], all_PubSeed_genomes)
-            if matches_features:
-                # Check if genome_ID is within expected genome_IDs in all_PubSeed_genomes
-                matches_features = [fig for fig in matches_features if get_orgid_from_fig(fig) in all_PubSeed_genomes]
-                if matches_features:
-                    evidence_sets[protein_ID]['matches_PubSeed_features'] = matches_features
-                    prot = True
 
+        protein_object, prot = evidence_sets[protein_ID].get_PubSeed_Matches_features_from_database_Sources(Blast_parameters,
+                                                                                                            all_PubSeed_genomes)
+        # If the protein_ID cannot be found in PubSeed, the protein_object is removed
         if not prot:
             try:
                 del evidence_sets[protein_ID]
@@ -348,7 +392,7 @@ def functional_role_consistency(fig_information, evidence_set, jaccard_threshold
     current_role = fig_information['Function']
     current_role_EC = findall(EC_number_pattern,current_role)
     current_role_EC = current_role_EC[0] if current_role_EC else ''
-    reference_roles = evidence_set['functional_roles']
+    reference_roles = evidence_set.functional_roles
 
     consistency = False
     for site in reference_roles:
@@ -399,27 +443,13 @@ def update_literature_PubSeed(evidence_sets, EC_number_sufficiency):
     sleep(3)
     print('Connected to PubSeed')
 
-    features_to_curate = {}
+    protein_features_to_curate = {}
     for protein_ID in list(evidence_sets.keys()):
-        evidence_set = evidence_sets[protein_ID]
-        entry_pubmed_IDs = list(set([pubmed_ID for site in evidence_set['pubmed_IDs'] for pubmed_ID in evidence_set['pubmed_IDs'][site]]))
-
-        if protein_ID and evidence_set['matches_PubSeed_features'] and entry_pubmed_IDs:
-            # if the protein_ID has an entry in PubSeed and an evidence article, check if the article is assigned to PubSeed entry
-            for fig in evidence_set['matches_PubSeed_features']:
-                all_fig_information = get_pubseed_fig_information(fig)
-                # Curate literature of the fig
-                curate_literature_to_fig(fig, all_fig_information[fig]['Ev'], entry_pubmed_IDs, browser)
-
-                # check if the current annotation is consistent with reference annotations. If not, trigger manual curation
-                consistency = functional_role_consistency(all_fig_information[fig], evidence_sets[protein_ID], 0.6, EC_number_sufficiency)
-                if not consistency:
-                    if protein_ID not in features_to_curate:
-                        features_to_curate[protein_ID] = []
-                    if fig not in features_to_curate[protein_ID]:
-                        features_to_curate[protein_ID].append(fig)
+        consistency, features_to_curate = evidence_sets[protein_ID].update_literature_pubseed_feature(browser, EC_number_sufficiency)
+        if not consistency and features_to_curate:
+            protein_features_to_curate[protein_ID] = list(set(features_to_curate))
     browser.quit()
-    return features_to_curate
+    return protein_features_to_curate
 
 def get_multiple_entry_evidences(ref_fig_list, targeted_sites, genome_exceptions):
 
@@ -481,7 +511,7 @@ def get_arborescence_PubSeed_Matches_features_from_Sources_IDs(ref_fig_list, tar
         multiple_arborescence_evidence_sets.update(evidence_sets)
 
         # define new fig to find papers about it and its homologs
-        new_ref_fig_list = [fig for protein_ID in evidence_sets for fig in evidence_sets[protein_ID]['matches_PubSeed_features']]
+        new_ref_fig_list = [fig for protein_ID in evidence_sets for fig in evidence_sets[protein_ID].matches_PubSeed_features]
         new_ref_fig_list = [fig for fig in new_ref_fig_list if fig not in ref_fig_list and fig not in already_explored_fig_list]
         ref_fig_list = get_multiple_fasta_information(new_ref_fig_list)
 
@@ -514,6 +544,7 @@ if __name__ == "__main__":
                 'fig|511145.12.peg.342', 'fig|511145.12.peg.343', 'fig|511145.12.peg.344'
                 ]
     fig_list = ['fig|511145.12.peg.3012', 'fig|511145.12.peg.3013', 'fig|511145.12.peg.3014', 'fig|511145.12.peg.3015']
+    fig_list = ['fig|511145.12.peg.3012']
     ref_fig_list = get_multiple_fasta_information(fig_list)
 
     # f_out = 'Inputs/my_seqs_to_reference.fasta'
@@ -545,18 +576,18 @@ if __name__ == "__main__":
                                                                    Blast_parameters, all_PubSeed_genomes, depth, workers)
         pickle.dump(evidence_sets, open('Inputs/pickle/evidence_sets.pkl', "wb"), protocol=pickle.HIGHEST_PROTOCOL)
         print('{0} dump to {1}'.format('evidence_sets', 'Inputs/pickle/evidence_sets.pkl'))
-
     else:
         evidence_sets = pickle.load(open('Inputs/pickle/evidence_sets.pkl', "rb"))
 
     pprint(evidence_sets)
-    if False:
+    pprint(evidence_sets['A4YEG1'].__dict__)
+    if True:
         EC_number_sufficiency = True
         curated_features = update_literature_PubSeed(evidence_sets, EC_number_sufficiency)
         pickle.dump(curated_features, open('Inputs/curated_features.pkl', "wb"), protocol=pickle.HIGHEST_PROTOCOL)
     else:
         curated_features = pickle.load(open('Inputs/curated_features.pkl', "rb"))
-        pprint(curated_features)
+        # pprint(curated_features)
 
     end = time.time()
     print(end - start)
